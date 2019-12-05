@@ -74,7 +74,8 @@
  *
  * Later changes can be tracked in SCM.
  */
-// #define DEBUG
+#define DEBUG
+#define DEBUG_VERBOSE
 #include <linux/kernel.h>
 #include <linux/input.h>
 #include <linux/rcupdate.h>
@@ -346,6 +347,9 @@ static const struct xpad_device {
 
 /* buttons shared with xbox and xbox360 */
 static const signed short xpad_common_btn[] = {
+	KEY_PLAYPAUSE, KEY_NEXTSONG,
+	KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN,
+	KEY_TAB, KEY_LEFTALT, KEY_LEFTCTRL, BTN_LEFT, BTN_RIGHT, /* mouse mode buttons */ 
 	BTN_A, BTN_B, BTN_X, BTN_Y,			/* "analog" buttons */
 	BTN_START, BTN_SELECT, BTN_THUMBL, BTN_THUMBR,	/* start/back/sticks */
 	-1						/* terminating entry */
@@ -376,6 +380,10 @@ static const signed short xpad360_btn[] = {  /* buttons for x360 controller */
 	-1
 };
 
+static const signed short xpad_rel[] = {
+	REL_X, REL_Y,		/* left stick as mouse */
+};
+
 static const signed short xpad_abs[] = {
 	ABS_X, ABS_Y,		/* left stick */
 	ABS_RX, ABS_RY,		/* right stick */
@@ -400,6 +408,7 @@ static const signed short xpad_abs_triggers[] = {
  * match against vendor id as well. Wired Xbox 360 devices have protocol 1,
  * wireless controllers have protocol 129.
  */
+//changed second arg from 1 to 2 in attempt to register device as a mouse
 #define XPAD_XBOX360_VENDOR_PROTOCOL(vend, pr) \
 	.match_flags = USB_DEVICE_ID_MATCH_VENDOR | USB_DEVICE_ID_MATCH_INT_INFO, \
 	.idVendor = (vend), \
@@ -553,6 +562,7 @@ struct xpad_output_packet {
 	bool pending;
 };
 
+#define CONFIG_JOYSTICK_XPAD_LEDS
 #define XPAD_OUT_CMD_IDX	0
 #define XPAD_OUT_FF_IDX		1
 #define XPAD_OUT_LED_IDX	(1 + IS_ENABLED(CONFIG_JOYSTICK_XPAD_FF))
@@ -568,6 +578,7 @@ struct usb_xpad {
 
 	bool pad_present;
 	bool input_created;
+	bool mouse_mode;
 
 	struct urb *irq_in;		/* urb for interrupt in report */
 	unsigned char *idata;		/* input data */
@@ -680,7 +691,7 @@ static void xpad_process_packet(struct usb_xpad *xpad, u16 cmd, unsigned char *d
  *	The used report descriptor was taken from:
  *		http://www.free60.org/wiki/Gamepad
  */
-
+static void xpad_send_led_command(struct usb_xpad *xpad, int command);
 static void xpad360_process_packet(struct usb_xpad *xpad, struct input_dev *dev,
 				   u16 cmd, unsigned char *data)
 {
@@ -691,10 +702,17 @@ static void xpad360_process_packet(struct usb_xpad *xpad, struct input_dev *dev,
 	/* digital pad */
 	if (xpad->mapping & MAP_DPAD_TO_BUTTONS) {
 		/* dpad as buttons (left, right, up, down) */
-		input_report_key(dev, BTN_TRIGGER_HAPPY1, data[2] & 0x04);
-		input_report_key(dev, BTN_TRIGGER_HAPPY2, data[2] & 0x08);
-		input_report_key(dev, BTN_TRIGGER_HAPPY3, data[2] & 0x01);
-		input_report_key(dev, BTN_TRIGGER_HAPPY4, data[2] & 0x02);
+		if (xpad->mouse_mode) {
+			input_report_key(dev, KEY_LEFT, data[2] & 0x04);
+			input_report_key(dev, KEY_RIGHT, data[2] & 0x08);
+			input_report_key(dev, KEY_UP, data[2] & 0x01);
+			input_report_key(dev, KEY_DOWN, data[2] & 0x02);
+		} else {
+			input_report_key(dev, BTN_TRIGGER_HAPPY1, data[2] & 0x04);
+			input_report_key(dev, BTN_TRIGGER_HAPPY2, data[2] & 0x08);
+			input_report_key(dev, BTN_TRIGGER_HAPPY3, data[2] & 0x01);
+			input_report_key(dev, BTN_TRIGGER_HAPPY4, data[2] & 0x02);
+		}
 	}
 
 	/*
@@ -705,41 +723,89 @@ static void xpad360_process_packet(struct usb_xpad *xpad, struct input_dev *dev,
 	 */
 	if (!(xpad->mapping & MAP_DPAD_TO_BUTTONS) ||
 	    xpad->xtype == XTYPE_XBOX360W) {
-		input_report_abs(dev, ABS_HAT0X,
-				 !!(data[2] & 0x08) - !!(data[2] & 0x04));
-		input_report_abs(dev, ABS_HAT0Y,
-				 !!(data[2] & 0x02) - !!(data[2] & 0x01));
+			/* dpad as buttons (left, right, up, down) */
+		if (xpad->mouse_mode) {
+			input_report_key(dev, KEY_LEFT, data[2] & 0x04);
+			input_report_key(dev, KEY_RIGHT, data[2] & 0x08);
+			input_report_key(dev, KEY_UP, data[2] & 0x01);
+			input_report_key(dev, KEY_DOWN, data[2] & 0x02);
+		} else {
+			input_report_abs(dev, ABS_HAT0X,
+					!!(data[2] & 0x08) - !!(data[2] & 0x04));
+			input_report_abs(dev, ABS_HAT0Y,
+					!!(data[2] & 0x02) - !!(data[2] & 0x01));
+		}
 	}
 
 	/* start/back buttons */
-	input_report_key(dev, BTN_START,  data[2] & 0x10);
-	input_report_key(dev, BTN_SELECT, data[2] & 0x20);
+	if (xpad->mouse_mode) {
+		input_report_key(dev, KEY_PLAYPAUSE,  data[2] & 0x10);
+		input_report_key(dev, KEY_NEXTSONG, data[2] & 0x20);
+	} else {
+		input_report_key(dev, BTN_START,  data[2] & 0x10);
+		input_report_key(dev, BTN_SELECT, data[2] & 0x20);
+	}
+	
 
-	/* stick press left/right */
-	input_report_key(dev, BTN_THUMBL, data[2] & 0x40);
-	input_report_key(dev, BTN_THUMBR, data[2] & 0x80);
-
-	/* buttons A,B,X,Y,TL,TR and MODE */
-	input_report_key(dev, BTN_A,	data[3] & 0x10);
-	input_report_key(dev, BTN_B,	data[3] & 0x20);
-	input_report_key(dev, BTN_X,	data[3] & 0x40);
-	input_report_key(dev, BTN_Y,	data[3] & 0x80);
-	input_report_key(dev, BTN_TL,	data[3] & 0x01);
-	input_report_key(dev, BTN_TR,	data[3] & 0x02);
 	input_report_key(dev, BTN_MODE,	data[3] & 0x04);
+	if (data[3] & 0x04) {
+		xpad->mouse_mode = !xpad->mouse_mode;
+		printk(KERN_DEBUG "xpad-dbg: mouse mode is %s", xpad->mouse_mode ? "on" : "off");
+		
+		if (xpad->mouse_mode) {
+			xpad_send_led_command(xpad, 14);
+		} else {
+			xpad_send_led_command(xpad, 0);
+		}
+
+	}
+
+	if (xpad->mouse_mode) {
+		input_report_key(dev, BTN_LEFT,	data[3] & 0x10);
+		input_report_key(dev, BTN_RIGHT, data[3] & 0x20);
+		input_report_key(dev, KEY_LEFTALT,	data[3] & 0x01);
+		input_report_key(dev, KEY_LEFTCTRL,	data[3] & 0x02);
+		input_report_key(dev, KEY_TAB,	data[3] & 0x40);
+	} else {
+		input_report_key(dev, BTN_A,	data[3] & 0x10);
+		input_report_key(dev, BTN_B,	data[3] & 0x20);
+		input_report_key(dev, BTN_X,	data[3] & 0x40);
+		input_report_key(dev, BTN_Y,	data[3] & 0x80);
+		input_report_key(dev, BTN_TL,	data[3] & 0x01);
+		input_report_key(dev, BTN_TR,	data[3] & 0x02);
+		input_report_key(dev, BTN_THUMBL, data[2] & 0x40);
+		input_report_key(dev, BTN_THUMBR, data[2] & 0x80);
+	}
 
 	if (!(xpad->mapping & MAP_STICKS_TO_NULL)) {
+
 		/* left stick */
-		input_report_abs(dev, ABS_X,
-				 (__s16) le16_to_cpup((__le16 *)(data + 6)));
-		input_report_abs(dev, ABS_Y,
-				 ~(__s16) le16_to_cpup((__le16 *)(data + 8)));
+		if (xpad->mouse_mode) {
+			__s16 xVal = (__s16) le16_to_cpup((__le16 *)(data + 6));
+			__s16 yVal = ~(__s16) le16_to_cpup((__le16 *)(data + 8));
+
+			input_report_rel(dev, REL_X, (__s16) (xVal / 4681));
+			input_report_rel(dev, REL_Y, (__s16) (yVal / 4681));
+		} else {
+			input_report_abs(dev, ABS_X, (__s16) le16_to_cpup((__le16 *)(data + 6)));
+			input_report_abs(dev, ABS_Y, ~(__s16) le16_to_cpup((__le16 *)(data + 8)));
+		}
+
+		
 
 		/* right stick */
-		input_report_abs(dev, ABS_RX,
-				 (__s16) le16_to_cpup((__le16 *)(data + 10)));
-		input_report_abs(dev, ABS_RY,
-				 ~(__s16) le16_to_cpup((__le16 *)(data + 12)));
+		if (xpad->mouse_mode) {
+			input_report_key(dev, KEY_LEFT, ((__s16) le16_to_cpup((__le16 *)(data + 10))) / 4681 < 0);
+			input_report_key(dev, KEY_RIGHT, ((__s16) le16_to_cpup((__le16 *)(data + 10))) / 4681 > 0);
+			input_report_key(dev, KEY_UP, (~(__s16) le16_to_cpup((__le16 *)(data + 12))) / 4681 > 0);
+			input_report_key(dev, KEY_DOWN, ~(__s16) le16_to_cpup((__le16 *)(data + 12)) / 4681 < 0);
+		} else {
+			input_report_abs(dev, ABS_RX,
+					(__s16) le16_to_cpup((__le16 *)(data + 10)));
+			input_report_abs(dev, ABS_RY,
+					~(__s16) le16_to_cpup((__le16 *)(data + 12)));
+		}
+		
 	}
 
 	/* triggers left/right */
@@ -941,9 +1007,8 @@ static void xpad_irq_in(struct urb *urb)
 	/* If you set rowsize to larger than 32 it defaults to 16?
 	 * Otherwise I would set it to XPAD_PKT_LEN                  V
 	 */
-	print_hex_dump(KERN_DEBUG, "xpad-dbg: ", DUMP_PREFIX_OFFSET, 32, 1, xpad->idata, XPAD_PKT_LEN, 0);
+	// print_hex_dump(KERN_DEBUG, "xpad-dbg: ", DUMP_PREFIX_OFFSET, 32, 1, xpad->idata, XPAD_PKT_LEN, 0);
 #endif
-
 	switch (xpad->xtype) {
 	case XTYPE_XBOX360:
 		xpad360_process_packet(xpad, xpad->dev, 0, xpad->idata);
@@ -961,7 +1026,7 @@ static void xpad_irq_in(struct urb *urb)
 exit:
 	retval = usb_submit_urb(urb, GFP_ATOMIC);
 	if (retval)
-		dev_err(dev, "%s - usb_submit_urb failed with result %d\n",
+		dev_err(dev, "%s - big yikes, we got an error with result %d\n",
 			__func__, retval);
 }
 
@@ -1041,7 +1106,7 @@ static int xpad_try_sending_next_out_packet(struct usb_xpad *xpad)
 		error = usb_submit_urb(xpad->irq_out, GFP_ATOMIC);
 		if (error) {
 			dev_err(&xpad->intf->dev,
-				"%s - usb_submit_urb failed with result %d\n",
+				"%s - big yikes, we got an error with result %d\n",
 				__func__, error);
 			usb_unanchor_urb(xpad->irq_out);
 			return -EIO;
@@ -1089,7 +1154,7 @@ static void xpad_irq_out(struct urb *urb)
 		error = usb_submit_urb(urb, GFP_ATOMIC);
 		if (error) {
 			dev_err(dev,
-				"%s - usb_submit_urb failed with result %d\n",
+				"%s - big yikes, we got an error with result %d\n",
 				__func__, error);
 			usb_unanchor_urb(urb);
 			xpad->irq_out_active = false;
@@ -1648,6 +1713,10 @@ static int xpad_init_input(struct usb_xpad *xpad)
 
 	input_dev->dev.parent = &xpad->intf->dev;
 
+	//set data to allow relative mouse movement
+	input_dev->evbit[0] |= BIT_MASK(EV_REL);
+	input_dev->relbit[0] = BIT_MASK(REL_X) | BIT_MASK(REL_Y);
+
 	input_set_drvdata(input_dev, xpad);
 
 	if (xpad->xtype != XTYPE_XBOX360W) {
@@ -1869,6 +1938,14 @@ err_free_mem:
 	return error;
 }
 
+
+static int xpad_probe_spoof(struct usb_interface *intf, const struct usb_device_id *id)
+{
+	int val = xpad_probe(intf, id);
+	printk(KERN_DEBUG "xpad-dbg: probe returning %d for device %s", val, intf->dev.init_name);
+	return val;
+}
+
 static void xpad_disconnect(struct usb_interface *intf)
 {
 	struct usb_xpad *xpad = usb_get_intfdata(intf);
@@ -1956,7 +2033,7 @@ static int xpad_resume(struct usb_interface *intf)
 
 static struct usb_driver xpad_driver = {
 	.name		= "xpad",
-	.probe		= xpad_probe,
+	.probe		= xpad_probe_spoof,
 	.disconnect	= xpad_disconnect,
 	.suspend	= xpad_suspend,
 	.resume		= xpad_resume,
